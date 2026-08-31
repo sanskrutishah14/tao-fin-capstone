@@ -17,6 +17,7 @@ def parse_filing_html(html: str) -> str:
         "header",
         "hidden",
         "script",
+        "table",
         "style",
         "ix:header",
         "ix:hidden"

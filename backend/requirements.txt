@@ -6,9 +6,11 @@ python-dotenv
 
 beautifulsoup4
 lxml
+pandas
 
 sentence-transformers
 faiss-cpu
 numpy
 
 pydantic
+yfinance

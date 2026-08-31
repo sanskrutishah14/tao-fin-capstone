@@ -87,7 +87,7 @@ vector_store.add(
 # --------------------------------------------------
 
 ollama_client = OllamaClient(
-    model="qwen2.5:7b"
+    model="phi3:latest"
 )
 
 

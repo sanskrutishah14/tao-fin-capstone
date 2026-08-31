@@ -43,7 +43,8 @@ class RAGPipeline:
     def build_prompt(
         self,
         question: str,
-        results
+        results,
+        revision_feedback: dict | None = None
     ):
         """
         Build a strict evidence-grounded prompt
@@ -92,69 +93,137 @@ EVIDENCE TEXT:
         )
 
         prompt = f"""
-You are a financial question-answering system.
+        You are a financial question-answering system.
 
-Your job is to answer the USER QUESTION using
-ONLY the provided EVIDENCE.
+        Your task is to answer the USER QUESTION using ONLY the
+        PROVIDED EVIDENCE.
 
-STRICT RULES:
+        ========================
+        STRICT RULES
+        ========================
 
-1. Answer ONLY the exact question asked.
+        1. Answer ONLY the exact question asked by the user.
 
-2. Do NOT answer a different question, even if
-   the evidence contains information about other
-   financial topics.
+        2. Do NOT answer a different question, even if the evidence
+        contains information about other financial topics.
 
-3. Use ONLY information contained in the evidence.
+        3. Use ONLY information explicitly contained in the provided
+        evidence.
 
-4. Do NOT use your pretrained knowledge.
+        4. Do NOT use pretrained knowledge or outside information.
 
-5. Do NOT make assumptions or invent numbers.
+        5. Do NOT make assumptions, estimates, or invent numbers.
 
-6. Identify the exact entity, metric, and financial
-   year requested by the user.
+        6. Identify the exact:
+        - company/entity
+        - financial metric
+        - financial year or period
+        requested by the user.
 
-7. If the requested value appears directly in the
-   evidence, use that value exactly.
+        7. If the requested value appears directly in the evidence,
+        use that value exactly.
 
-8. Preserve the original units from the evidence.
-   For example, if the evidence says "in millions",
-   report the value in millions.
+        8. Preserve the units stated in the evidence.
+        For example, if the evidence states "(in millions)",
+        report the value in millions.
 
-9. If the evidence contains multiple years, use ONLY
-   the year requested by the user.
+        9. If multiple years are present, use ONLY the year requested
+        by the user.
 
-10. Ignore unrelated information in the evidence.
+        10. Ignore unrelated information in the evidence.
 
-11. If the evidence does not contain enough information
-    to answer the question, respond exactly:
+        11. If the requested information is explicitly present in
+            the evidence, NEVER respond with "Insufficient evidence."
 
-    Insufficient evidence.
+        12. Respond with "Insufficient evidence." ONLY when the
+            provided evidence genuinely does not contain enough
+            information to answer the user's exact question.
 
-12. Keep the final answer concise.
+        13. Keep the answer concise.
 
-13. Mention the evidence number supporting your answer.
+        14. Include the evidence number that directly supports the
+            answer.
 
-USER QUESTION:
-{question}
+        15. Do not explain your reasoning or analysis.
 
-PROVIDED EVIDENCE:
-{evidence}
+        ========================
+        REQUIRED OUTPUT FORMAT
+        ========================
 
-REASONING CHECK:
+        Answer:
+        <direct answer to the user's question>
 
-Before producing the final answer, determine:
+        Evidence:
+        <EVIDENCE number(s) supporting the answer>
 
-- What company is being asked about?
-- What financial metric is being requested?
-- What financial year is requested?
-- Which evidence contains the requested information?
-- Is the requested value explicitly present?
+        ========================
+        USER QUESTION
+        ========================
 
-Do not output this reasoning.
+        {question}
 
-FINAL ANSWER:
-"""
+        ========================
+        PROVIDED EVIDENCE
+        ========================
+
+        {evidence}
+
+        ========================
+        INTERNAL CHECK
+        ========================
+
+        Before answering, internally determine:
+
+        - What company/entity is being asked about?
+        - What metric is being requested?
+        - What financial year/period is requested?
+        - Which evidence contains that metric?
+        - Does the evidence explicitly contain the requested value?
+        - Are the units correct?
+        - Does the answer address ONLY the user's question?
+
+        Do NOT output this reasoning.
+
+        """
+
+        if revision_feedback:
+            prompt += f"""
+        ========================
+        PREVIOUS ANSWER FEEDBACK
+        ========================
+
+        Your previous answer was:
+
+        "{revision_feedback.get("previous_answer", "")}"
+
+        The previous answer failed these checks:
+
+        {", ".join(revision_feedback.get("failed_checks", []))}
+
+        Correct the answer.
+
+        You MUST:
+        - answer only the original user question
+        - use only the provided evidence
+        - use the correct company/entity
+        - use the correct metric
+        - use the correct financial year
+        - use the exact value from the evidence when available
+        - preserve the evidence's units
+        - include the supporting evidence number
+        - avoid unrelated information
+        - avoid saying "Insufficient evidence" when the answer is
+        explicitly present in the evidence
+
+        Do NOT output your reasoning.
+        """
+
+        prompt += """
+        ========================
+        FINAL ANSWER
+        ========================
+        """
+
 
         return prompt
 
