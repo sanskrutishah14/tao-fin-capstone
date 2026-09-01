@@ -1,18 +1,20 @@
 """
 Hybrid retriever: FAISS (semantic) + BM25 (keyword) fused via
-Reciprocal Rank Fusion (RRF), with a cross-encoder reranking pass.
-
-RRF is a simple, effective rank-level fusion that doesn't require
-calibrating or normalizing scores across two very different scoring
-systems (cosine similarity vs. BM25 term-frequency scores):
-
-    RRF_score(d) = sum over each retriever i of  1 / (k + rank_i(d))
-
-where k is a smoothing constant (default 60) and rank_i(d) is the
-rank of document d in retrieval system i (0 if it didn't appear).
+Reciprocal Rank Fusion (RRF), with an optional cross-encoder reranking pass.
 
 Pipeline:
-    query -> FAISS top-N + BM25 top-N -> RRF merge -> rerank -> top-K
+
+    query
+      ↓
+    FAISS semantic search
+      +
+    BM25 keyword search
+      ↓
+    RRF fusion
+      ↓
+    cross-encoder reranking
+      ↓
+    top-K evidence
 """
 
 from collections import defaultdict
@@ -27,7 +29,7 @@ from app.services.vector_store import FAISSVectorStore
 class HybridRetriever:
     """
     Combines FAISS semantic search and BM25 keyword search via RRF,
-    then (optionally) reranks the fused shortlist with a cross-encoder.
+    then optionally reranks the fused shortlist with a cross-encoder.
     """
 
     def __init__(
@@ -44,6 +46,21 @@ class HybridRetriever:
         self.reranker = reranker
         self.rrf_k = rrf_k
 
+    def get_table_chunks(self) -> List[Dict]:
+        """
+        Return every indexed table chunk.
+
+        This is used by metrics_resolver.py for deterministic financial
+        lookups and calculations. It intentionally scans the indexed
+        tables rather than depending only on the top-K retrieval results.
+        """
+
+        return [
+            document
+            for document in self.vector_store.documents
+            if document.get("metadata", {}).get("type") == "table"
+        ]
+
     def retrieve(
         self,
         question: str,
@@ -55,28 +72,42 @@ class HybridRetriever:
         """
         Full hybrid retrieval pipeline:
 
-        1. FAISS semantic search  -> faiss_candidates
-        2. BM25 keyword search    -> bm25_candidates
-        3. RRF fusion of the two
-        4. Cross-encoder rerank of the fused shortlist (if enabled)
-        5. Return top_k, in the same {"score":, "document":} shape
-           the rest of the app (rag_pipeline.build_prompt, etc.)
-           already expects.
+        1. FAISS semantic search
+        2. BM25 keyword search
+        3. RRF fusion
+        4. Cross-encoder reranking
+        5. Return top_k
         """
+
         query_embedding = self.embedding_service.embed_query(question)
-        faiss_results = self.vector_store.search(query_embedding, top_k=faiss_candidates)
 
-        bm25_results = self.bm25_index.search(question, top_k=bm25_candidates)
+        faiss_results = self.vector_store.search(
+            query_embedding,
+            top_k=faiss_candidates,
+        )
 
-        fused = self._rrf_fuse(faiss_results, bm25_results)
+        bm25_results = self.bm25_index.search(
+            question,
+            top_k=bm25_candidates,
+        )
 
-        # Rerank a somewhat wider pool than top_k so the cross-encoder
-        # actually gets to correct FAISS/BM25 mistakes, not just
-        # reorder an already-narrow list.
-        rerank_pool = fused[: max(top_k * 3, 15)]
+        fused = self._rrf_fuse(
+            faiss_results,
+            bm25_results,
+        )
 
-        if use_reranker and self.reranker is not None and rerank_pool:
-            return self.reranker.rerank(question, rerank_pool, top_k=top_k)
+        rerank_pool = fused[:max(top_k * 3, 15)]
+
+        if (
+            use_reranker
+            and self.reranker is not None
+            and rerank_pool
+        ):
+            return self.reranker.rerank(
+                question,
+                rerank_pool,
+                top_k=top_k,
+            )
 
         return fused[:top_k]
 
@@ -85,23 +116,42 @@ class HybridRetriever:
         faiss_results: List[Dict],
         bm25_results: List[Dict],
     ) -> List[Dict]:
-        """Reciprocal Rank Fusion across the FAISS and BM25 result lists."""
+        """
+        Reciprocal Rank Fusion across FAISS and BM25 results.
+        """
+
         rrf_scores: Dict[int, float] = defaultdict(float)
         lookup: Dict[int, Dict] = {}
 
         for rank, result in enumerate(faiss_results):
             idx = result["index"]
-            rrf_scores[idx] += 1.0 / (self.rrf_k + rank + 1)
+
+            rrf_scores[idx] += (
+                1.0 / (self.rrf_k + rank + 1)
+            )
+
             lookup[idx] = result["document"]
 
         for rank, result in enumerate(bm25_results):
             idx = result["index"]
-            rrf_scores[idx] += 1.0 / (self.rrf_k + rank + 1)
+
+            rrf_scores[idx] += (
+                1.0 / (self.rrf_k + rank + 1)
+            )
+
             lookup[idx] = result["document"]
 
-        sorted_indices = sorted(rrf_scores, key=rrf_scores.get, reverse=True)
+        sorted_indices = sorted(
+            rrf_scores,
+            key=rrf_scores.get,
+            reverse=True,
+        )
 
         return [
-            {"score": rrf_scores[idx], "index": idx, "document": lookup[idx]}
+            {
+                "score": rrf_scores[idx],
+                "index": idx,
+                "document": lookup[idx],
+            }
             for idx in sorted_indices
         ]

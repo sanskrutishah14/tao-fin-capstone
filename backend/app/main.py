@@ -157,7 +157,20 @@ def build_rag_index():
         ollama_client=OllamaClient(),
     )
 
-    app.state.tao_pipeline = TAOPipeline(rag_pipeline)
+        # ticker -> company name, used by TAOPipeline's yfinance fallback to
+    # guess which company a question is about when the filing evidence
+    # doesn't have the needed line items.
+    db = SessionLocal()
+    try:
+        from app.db.models import Company
+        company_index = {
+            c.ticker: (c.name or c.ticker)
+            for c in db.query(Company).all()
+        }
+    finally:
+        db.close()
+
+    app.state.tao_pipeline = TAOPipeline(rag_pipeline, company_index=company_index)
 
     print(
         f"[startup] Indexed {len(all_chunks)} chunks from {len(filing_records)} filing(s) "

@@ -57,19 +57,24 @@ class VerificationResult:
         }
 
 
-def _check_numerical(answer: str, evidence_text: str) -> bool:
-    """Every number the answer states should be traceable to the evidence."""
+def _check_numerical(
+    answer: str,
+    evidence_text: str,
+    extra_allowed_numbers: List[float] | None = None,
+) -> bool:
+    """Every number the answer states should be traceable to the evidence
+    (or, for calculation questions, be the metrics_resolver's own
+    deterministically-computed value -- see extra_allowed_numbers)."""
 
-    # Strip citation markers like "(Evidence 1)" first -- otherwise the
-    # citation index itself gets picked up as an unverifiable "number".
     cleaned_answer = _CITATION_PATTERN.sub("", answer)
     answer_numbers = extract_numbers(cleaned_answer)
 
     if not answer_numbers:
-        # No numeric claims made -- nothing to contradict.
         return True
 
     evidence_numbers = extract_numbers(evidence_text)
+    if extra_allowed_numbers:
+        evidence_numbers = evidence_numbers + list(extra_allowed_numbers)
 
     if not evidence_numbers:
         return False
@@ -158,13 +163,16 @@ def verify(
     results: List[Dict],
     task_type: str = "lookup",
     requires_calculation: bool = False,
+    computed_metric: Dict | None = None,
 ) -> VerificationResult:
 
     evidence_text = "\n".join(
         r["document"].get("text", "") for r in results
     )
 
-    numerical_ok = _check_numerical(answer, evidence_text)
+    extra_allowed = [computed_metric["computed_value_pct"]] if computed_metric else None
+
+    numerical_ok = _check_numerical(answer, evidence_text, extra_allowed_numbers=extra_allowed)
     evidence_ok = _check_evidence(answer, results)
     logical_ok = _check_logical(answer)
     financial_ok = _check_financial_consistency(answer, task_type, requires_calculation)

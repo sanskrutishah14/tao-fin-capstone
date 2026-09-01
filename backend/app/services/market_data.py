@@ -57,6 +57,38 @@ def get_quote(symbol: str, exchange: Exchange = "US") -> Dict:
         "currency": fast_info.get("currency"),
     }
 
+def get_financial_ratios(symbol: str, exchange: Exchange = "US") -> Dict:
+    """
+    Fallback source for named margin ratios when the indexed SEC
+    filings don't contain the underlying line items. yfinance's
+    .info exposes these as trailing-twelve-month (TTM) figures, which
+    is NOT the same thing as a specific fiscal year's audited figure
+    -- callers must label this distinction clearly to the user.
+    """
+
+    resolved = _resolve_symbol(symbol, exchange)
+
+    try:
+        info = yf.Ticker(resolved).info
+    except Exception as e:
+        raise RuntimeError(f"Could not fetch financial ratios for '{resolved}': {e}") from e
+
+    def pct(key: str):
+        v = info.get(key)
+        return round(v * 100, 2) if v is not None else None
+
+    return {
+        "symbol": resolved,
+        "operating_margin_pct": pct("operatingMargins"),
+        "gross_margin_pct": pct("grossMargins"),
+        "profit_margin_pct": pct("profitMargins"),
+        "period": "trailing_twelve_months",
+        "note": (
+            "Trailing-twelve-month figures from Yahoo Finance, not tied "
+            "to a specific fiscal year filing."
+        ),
+    }
+
 
 def get_history(symbol: str, exchange: Exchange = "US", period: str = "1mo") -> Dict:
     """period examples: '1d','5d','1mo','3mo','6mo','1y','ytd','max'"""

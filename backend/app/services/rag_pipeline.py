@@ -1,3 +1,6 @@
+# backend/app/services/rag_pipeline.py
+
+import re
 
 from app.services.hybrid_retriever import HybridRetriever
 from app.services.ollama_client import OllamaClient
@@ -18,6 +21,27 @@ _CALCULATION_GUIDANCE = """
             "is shown in the evidence" without stating the value.
             Only use numbers that literally appear in the evidence as
             inputs to the formula -- do not invent the inputs.
+"""
+
+_COMPUTED_METRIC_TEMPLATE = """
+        ========================
+        PRE-COMPUTED RESULT (already calculated for you -- do not recompute)
+        ========================
+
+        The system has already located the exact inputs for this metric
+        in the filing and computed it deterministically:
+
+        Metric:            {metric}
+        Fiscal year:        {year}
+        {numerator_label}:  {numerator_value:,.0f}
+        {denominator_label}: {denominator_value:,.0f}
+        Formula:            {numerator_label} / {denominator_label} x 100
+        Computed value:      {computed_value_pct}%
+
+        Use this exact computed value in your Answer. State it clearly
+        (e.g. "Apple's operating margin for fiscal year {year} was
+        {computed_value_pct}%") and briefly explain how it was derived
+        from the two evidence figures above (1-3 sentences).
 """
 
 
@@ -53,6 +77,7 @@ class RAGPipeline:
         results,
         revision_feedback: dict | None = None,
         requires_calculation: bool = False,
+        computed_metric: dict | None = None,
     ):
         """
         Build a strict evidence-grounded prompt
@@ -147,13 +172,22 @@ EVIDENCE TEXT:
             provided evidence genuinely does not contain enough
             information to answer the user's exact question.
 
-        13. Keep the answer concise.
+        13. Give a complete answer: state the requested value clearly
+            (e.g. "Apple's operating margin for fiscal year 2025 was
+            31.97%"), then briefly explain how it was derived from the
+            evidence in 1-3 sentences (e.g. which two figures were used
+            and the formula). Do not pad with unrelated commentary.
 
         14. Include the evidence number that directly supports the
             answer.
 
-        15. Do not explain your reasoning or analysis.
+        15. Do NOT print your internal checklist, scratchpad, or any
+            step-by-step deliberation -- only the final "Answer:" /
+            "Evidence:" block. The brief explanation required by rule
+            13 belongs INSIDE the Answer text, not as separate visible
+            reasoning before it.
         {_CALCULATION_GUIDANCE if requires_calculation else ""}
+        {_COMPUTED_METRIC_TEMPLATE.format(**computed_metric) if computed_metric else ""}
         ========================
         REQUIRED OUTPUT FORMAT
         ========================
@@ -244,24 +278,45 @@ EVIDENCE TEXT:
         return prompt
 
     @staticmethod
+    def _strip_marker(raw_text: str) -> str:
+        """
+        Strip the leading "Answer:" marker (and any markdown asterisks
+        wrapped around it), but KEEP a trailing "Evidence: N" section --
+        the verifier's citation check needs to see it. Use this for the
+        text that gets verified; use _clean_answer() for what's shown
+        to the user.
+        """
+        marker_re = re.compile(r"[\*#\s]*answer[\*#\s]*:[\*#\s]*", re.IGNORECASE)
+        match = marker_re.search(raw_text)
+
+        if match is None:
+            return raw_text.strip().strip("*# ").strip()
+
+        return raw_text[match.end():].strip()
+
+    @staticmethod
+    def _strip_evidence_section(text: str) -> str:
+        """Drop a trailing 'Evidence: N' section -- it's already shown
+        separately as the API's evidence array, so it shouldn't also
+        clutter the display answer."""
+        evidence_marker = re.search(r"[\*#\s]*evidence[\*#\s]*:", text, re.IGNORECASE)
+        if evidence_marker:
+            text = text[:evidence_marker.start()]
+        return text.strip().strip("*# ").strip()
+
+    @staticmethod
     def _clean_answer(raw_text: str) -> str:
         """
+        Full cleanup for DISPLAY: strip the "Answer:" marker (and any
+        markdown wrapping it) and drop a trailing "Evidence:" section.
         Small local models sometimes ignore "don't show your reasoning"
-        and print their internal-check notes before the real answer.
-        If the model DID follow instructions and emitted "Answer:",
-        cut everything before that marker so leaked reasoning never
-        ends up in the final answer field.
+        and print internal-check notes before the real answer, or wrap
+        the marker in markdown bold (**Answer:**) despite being told
+        not to use markdown -- this handles both.
         """
-        marker = "answer:"
-        lower = raw_text.lower()
-        idx = lower.find(marker)
-
-        if idx == -1:
-            # Model didn't use the marker at all -- return as-is rather
-            # than silently dropping content.
-            return raw_text.strip()
-
-        return raw_text[idx:].strip()
+        return RAGPipeline._strip_evidence_section(
+            RAGPipeline._strip_marker(raw_text)
+        )
 
     def answer(
         self,
