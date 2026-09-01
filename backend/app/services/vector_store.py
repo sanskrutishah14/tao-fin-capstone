@@ -1,6 +1,4 @@
 
-from pathlib import Path
-
 import faiss
 import numpy as np
 
@@ -9,10 +7,10 @@ class FAISSVectorStore:
 
     def __init__(self, dimension: int):
         """
-        Create a FAISS index using inner-product similarity.
+        FAISS vector store using inner-product similarity.
 
-        Our embeddings are normalized, so inner product
-        is equivalent to cosine similarity.
+        Embeddings are normalized before being added,
+        so inner product is equivalent to cosine similarity.
         """
 
         self.dimension = dimension
@@ -21,7 +19,8 @@ class FAISSVectorStore:
             dimension
         )
 
-        # Keep the original chunks separately.
+        # Store the original documents/chunks
+        # corresponding to FAISS vectors.
         self.documents = []
 
     def add(
@@ -40,13 +39,22 @@ class FAISSVectorStore:
         )
 
         if vectors.ndim == 1:
-            vectors = vectors.reshape(1, -1)
+            vectors = vectors.reshape(
+                1,
+                -1
+            )
 
         if vectors.shape[1] != self.dimension:
             raise ValueError(
                 f"Expected embedding dimension "
                 f"{self.dimension}, "
                 f"got {vectors.shape[1]}"
+            )
+
+        if len(vectors) != len(documents):
+            raise ValueError(
+                "Number of embeddings must match "
+                "number of documents"
             )
 
         self.index.add(vectors)
@@ -61,8 +69,12 @@ class FAISSVectorStore:
         top_k: int = 5
     ):
         """
-        Search for the most similar documents.
+        Search for the most semantically similar
+        documents.
         """
+
+        if not self.documents:
+            return []
 
         query_vector = np.asarray(
             query_embedding,
@@ -71,12 +83,25 @@ class FAISSVectorStore:
 
         if query_vector.ndim == 1:
             query_vector = query_vector.reshape(
-                1, -1
+                1,
+                -1
             )
+
+        if query_vector.shape[1] != self.dimension:
+            raise ValueError(
+                f"Expected query dimension "
+                f"{self.dimension}, "
+                f"got {query_vector.shape[1]}"
+            )
+
+        k = min(
+            top_k,
+            len(self.documents)
+        )
 
         scores, indices = self.index.search(
             query_vector,
-            min(top_k, len(self.documents))
+            k
         )
 
         results = []

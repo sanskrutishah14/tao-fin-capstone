@@ -4,18 +4,25 @@ from typing import List, Dict
 
 def split_into_chunks(
     text: str,
-    chunk_size: int = 1200,
-    overlap: int = 200,
+    chunk_size: int = 500,
+    overlap: int = 75,
     metadata: Dict | None = None
 ) -> List[Dict]:
     """
-    Split a financial filing into overlapping chunks.
+    Split a document into overlapping chunks.
 
     Each chunk contains:
     - text
-    - chunk ID
-    - source metadata
+    - chunk metadata
     """
+
+    if not text or not text.strip():
+        return []
+
+    if overlap >= chunk_size:
+        raise ValueError(
+            "overlap must be smaller than chunk_size"
+        )
 
     words = text.split()
 
@@ -42,9 +49,7 @@ def split_into_chunks(
         }
 
         if metadata:
-            chunk_metadata.update(
-                metadata
-            )
+            chunk_metadata.update(metadata)
 
         chunks.append({
             "text": chunk_text,

@@ -1,3 +1,4 @@
+import re
 
 from app.services.embeddings import EmbeddingService
 from app.services.vector_store import FAISSVectorStore
@@ -16,15 +17,110 @@ class RAGPipeline:
         self.embedding_service = embedding_service
         self.ollama_client = ollama_client
 
+    # ============================================================
+    # QUERY TERM EXTRACTION
+    # ============================================================
+
+    def _extract_query_terms(
+        self,
+        question: str
+    ):
+        """
+        Extract meaningful terms from the user's question.
+
+        No financial metrics, companies, or domains
+        are hardcoded here.
+        """
+
+        stop_words = {
+            "what",
+            "was",
+            "were",
+            "is",
+            "are",
+            "the",
+            "a",
+            "an",
+            "of",
+            "in",
+            "for",
+            "to",
+            "from",
+            "on",
+            "and",
+            "or",
+            "how",
+            "much",
+            "many",
+            "did",
+            "does",
+            "do",
+            "has",
+            "have",
+            "had",
+            "this",
+            "that",
+            "these",
+            "those",
+            "their",
+            "its",
+            "it",
+            "company",
+            "tell",
+            "me",
+            "give",
+            "show",
+            "please",
+            "can",
+            "you"
+        }
+
+        words = re.findall(
+            r"\b[a-zA-Z0-9]+\b",
+            question.lower()
+        )
+
+        terms = set()
+
+        for word in words:
+
+            if word in stop_words:
+                continue
+
+            # Keep years.
+            if re.fullmatch(
+                r"20\d{2}",
+                word
+            ):
+                terms.add(word)
+                continue
+
+            # Ignore very short words.
+            if len(word) < 3:
+                continue
+
+            terms.add(word)
+
+        return terms
+
+    # ============================================================
+    # RETRIEVAL
+    # ============================================================
+
     def retrieve(
         self,
         question: str,
-        top_k: int = 2
+        top_k: int = 5
     ):
         """
-        Convert the user's question into an embedding
-        and retrieve the most relevant SEC evidence
-        from FAISS.
+        Hybrid retrieval:
+
+        1. Semantic similarity using FAISS.
+        2. Generic lexical matching.
+        3. Generic year matching.
+        4. Re-ranking.
+
+        No financial concepts are hardcoded.
         """
 
         query_embedding = (
@@ -33,219 +129,280 @@ class RAGPipeline:
             )
         )
 
-        results = self.vector_store.search(
-            query_embedding,
-            top_k=top_k
+        # Retrieve a larger candidate pool first.
+        candidate_k = max(
+            top_k * 5,
+            20
         )
 
-        return results
+        results = self.vector_store.search(
+            query_embedding,
+            top_k=candidate_k
+        )
 
-    def build_prompt(
-        self,
-        question: str,
-        results,
-        revision_feedback: dict | None = None
-    ):
-        """
-        Build a strict evidence-grounded prompt
-        for the Ollama LLM.
-        """
+        if not results:
+            return []
 
-        evidence_blocks = []
+        query_terms = self._extract_query_terms(
+            question
+        )
 
-        for i, result in enumerate(
-            results,
-            start=1
-        ):
+        # Extract years separately.
+        query_years = set(
+            re.findall(
+                r"\b20\d{2}\b",
+                question
+            )
+        )
+
+        reranked = []
+
+        for result in results:
 
             document = result["document"]
 
-            metadata = document.get(
-                "metadata",
-                {}
+            text = document.get(
+                "text",
+                ""
             )
 
-            evidence_blocks.append(
-                f"""
-====================
-EVIDENCE {i}
-====================
+            text_lower = text.lower()
 
-SOURCE:
-{metadata.get("source", "Unknown")}
+            semantic_score = result["score"]
 
-COMPANY:
-{metadata.get("company", "Unknown")}
+            # ----------------------------------------------------
+            # Generic lexical matching
+            # ----------------------------------------------------
 
-FILING:
-{metadata.get("filing", "Unknown")}
+            matched_terms = []
 
-FORM:
-{metadata.get("form", "Unknown")}
+            for term in query_terms:
 
-EVIDENCE TEXT:
-{document.get("text", "")}
-"""
+                pattern = (
+                    r"\b"
+                    + re.escape(term.lower())
+                    + r"\b"
+                )
+
+                if re.search(
+                    pattern,
+                    text_lower
+                ):
+                    matched_terms.append(term)
+
+            if query_terms:
+
+                keyword_score = (
+                    len(matched_terms)
+                    / len(query_terms)
+                )
+
+            else:
+
+                keyword_score = 0.0
+
+            # ----------------------------------------------------
+            # Generic year matching
+            # ----------------------------------------------------
+
+            matched_years = []
+
+            for year in query_years:
+
+                if re.search(
+                    r"\b"
+                    + re.escape(year)
+                    + r"\b",
+                    text
+                ):
+                    matched_years.append(year)
+
+            if query_years:
+
+                year_score = (
+                    len(matched_years)
+                    / len(query_years)
+                )
+
+            else:
+
+                year_score = 0.0
+
+            # ----------------------------------------------------
+            # Combined score
+            # ----------------------------------------------------
+
+            final_score = (
+                (semantic_score * 0.70)
+                + (keyword_score * 0.20)
+                + (year_score * 0.10)
             )
 
-        evidence = "\n".join(
-            evidence_blocks
+            reranked.append({
+                "score": float(
+                    final_score
+                ),
+                "semantic_score": float(
+                    semantic_score
+                ),
+                "keyword_score": float(
+                    keyword_score
+                ),
+                "year_score": float(
+                    year_score
+                ),
+                "matched_terms": matched_terms,
+                "matched_years": matched_years,
+                "document": document
+            })
+
+        # Highest score first.
+        reranked.sort(
+            key=lambda x: x["score"],
+            reverse=True
         )
 
-        prompt = f"""
+        return reranked[:top_k]
+
+    # ============================================================
+    # PROMPT BUILDING
+    # ============================================================
+
+    def build_prompt(
+            self,
+            question: str,
+            results,
+            revision_feedback: dict | None = None
+        ):
+            """
+            Build a strict evidence-grounded prompt for Ollama.
+            The model must return only a concise answer and evidence reference.
+            """
+
+            evidence_blocks = []
+
+            for i, result in enumerate(results, start=1):
+
+                document = result["document"]
+
+                metadata = document.get(
+                    "metadata",
+                    {}
+                )
+
+                evidence_blocks.append(
+                    f"""
+        ====================
+        EVIDENCE {i}
+        ====================
+
+        SOURCE: {metadata.get("source", "Unknown")}
+        COMPANY: {metadata.get("company", "Unknown")}
+        FILING: {metadata.get("filing", "Unknown")}
+        FORM: {metadata.get("form", "Unknown")}
+
+        TEXT:
+        {document.get("text", "")}
+        """
+                )
+
+            evidence = "\n".join(evidence_blocks)
+
+            prompt = f"""
         You are a financial question-answering system.
 
-        Your task is to answer the USER QUESTION using ONLY the
-        PROVIDED EVIDENCE.
+        Answer the user's question using ONLY the provided evidence.
 
-        ========================
-        STRICT RULES
-        ========================
+        IMPORTANT:
 
-        1. Answer ONLY the exact question asked by the user.
+        - Answer the EXACT question asked.
+        - Identify the company, metric, and year requested.
+        - Use the exact value from the evidence when available.
+        - Do not use outside knowledge.
+        - Do not invent or calculate values unless the evidence requires a simple calculation.
+        - If multiple years appear, use only the requested year.
+        - Ignore unrelated information.
+        - Preserve the units from the evidence.
+        - If the answer is explicitly present in the evidence, use it.
+        - If the evidence does not contain enough information, answer:
+        Insufficient evidence.
 
-        2. Do NOT answer a different question, even if the evidence
-        contains information about other financial topics.
+        DO NOT:
+        - explain your reasoning
+        - describe what the question is asking
+        - describe the company
+        - repeat the question
+        - discuss the evidence
+        - provide a summary
+        - mention your internal reasoning
+        - answer a related question
+        - add financial information that was not requested
 
-        3. Use ONLY information explicitly contained in the provided
-        evidence.
-
-        4. Do NOT use pretrained knowledge or outside information.
-
-        5. Do NOT make assumptions, estimates, or invent numbers.
-
-        6. Identify the exact:
-        - company/entity
-        - financial metric
-        - financial year or period
-        requested by the user.
-
-        7. If the requested value appears directly in the evidence,
-        use that value exactly.
-
-        8. Preserve the units stated in the evidence.
-        For example, if the evidence states "(in millions)",
-        report the value in millions.
-
-        9. If multiple years are present, use ONLY the year requested
-        by the user.
-
-        10. Ignore unrelated information in the evidence.
-
-        11. If the requested information is explicitly present in
-            the evidence, NEVER respond with "Insufficient evidence."
-
-        12. Respond with "Insufficient evidence." ONLY when the
-            provided evidence genuinely does not contain enough
-            information to answer the user's exact question.
-
-        13. Keep the answer concise.
-
-        14. Include the evidence number that directly supports the
-            answer.
-
-        15. Do not explain your reasoning or analysis.
-
-        ========================
-        REQUIRED OUTPUT FORMAT
-        ========================
+        Your response MUST contain only:
 
         Answer:
-        <direct answer to the user's question>
+        <one or two concise sentences directly answering the question>
 
         Evidence:
         <EVIDENCE number(s) supporting the answer>
 
-        ========================
-        USER QUESTION
-        ========================
-
+        USER QUESTION:
         {question}
 
-        ========================
-        PROVIDED EVIDENCE
-        ========================
+        PROVIDED EVIDENCE:
 
         {evidence}
-
-        ========================
-        INTERNAL CHECK
-        ========================
-
-        Before answering, internally determine:
-
-        - What company/entity is being asked about?
-        - What metric is being requested?
-        - What financial year/period is requested?
-        - Which evidence contains that metric?
-        - Does the evidence explicitly contain the requested value?
-        - Are the units correct?
-        - Does the answer address ONLY the user's question?
-
-        Do NOT output this reasoning.
-
         """
 
-        if revision_feedback:
-            prompt += f"""
-        ========================
-        PREVIOUS ANSWER FEEDBACK
-        ========================
+            if revision_feedback:
+                prompt += f"""
 
-        Your previous answer was:
+        The previous answer was incorrect.
 
-        "{revision_feedback.get("previous_answer", "")}"
+        Previous answer:
+        {revision_feedback.get("previous_answer", "")}
 
-        The previous answer failed these checks:
-
+        Failed checks:
         {", ".join(revision_feedback.get("failed_checks", []))}
 
-        Correct the answer.
+        Generate a corrected answer.
 
-        You MUST:
-        - answer only the original user question
-        - use only the provided evidence
-        - use the correct company/entity
-        - use the correct metric
-        - use the correct financial year
-        - use the exact value from the evidence when available
-        - preserve the evidence's units
-        - include the supporting evidence number
-        - avoid unrelated information
-        - avoid saying "Insufficient evidence" when the answer is
-        explicitly present in the evidence
+        Again, output ONLY:
 
-        Do NOT output your reasoning.
+        Answer:
+        <direct answer>
+
+        Evidence:
+        <EVIDENCE number(s)>
         """
 
-        prompt += """
-        ========================
-        FINAL ANSWER
-        ========================
-        """
+            return prompt
 
-
-        return prompt
+    # ============================================================
+    # COMPLETE RAG PIPELINE
+    # ============================================================
 
     def answer(
         self,
         question: str,
-        top_k: int = 2
+        top_k: int = 3
     ):
         """
         Complete RAG pipeline:
 
-        Question
+        User question
             ↓
-        FAISS retrieval
+        Query embedding
             ↓
-        Evidence
+        FAISS semantic retrieval
             ↓
-        Prompt
+        Lexical/year re-ranking
+            ↓
+        Top-K evidence
             ↓
         Ollama LLM
             ↓
-        Answer
+        Grounded answer
         """
 
         results = self.retrieve(
@@ -272,4 +429,4 @@ EVIDENCE TEXT:
         return {
             "answer": answer,
             "evidence": results
-        }
+        } 

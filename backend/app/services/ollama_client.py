@@ -37,7 +37,7 @@ class OllamaClient:
     ):
         self.model = model or os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b-instruct")
         self.timeout = timeout
-        self.num_ctx = num_ctx or int(os.getenv("OLLAMA_NUM_CTX", "4096"))
+        self.num_ctx = num_ctx or int(os.getenv("OLLAMA_NUM_CTX", "2048"))
         self.allow_fallback = allow_fallback
 
     def _call(self, model: str, prompt: str) -> requests.Response:
