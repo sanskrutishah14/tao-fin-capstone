@@ -123,6 +123,17 @@ def _check_logical(answer: str) -> bool:
     return not any(contradiction_markers)
 
 
+def _is_probably_year(n: float) -> bool:
+    """
+    4-digit whole numbers in a plausible calendar-year range are almost
+    always year references ("fiscal 2025", "compared to 2024") rather
+    than financial figures. Without filtering these out, a purely
+    narrative answer that just mentions the fiscal year would falsely
+    satisfy the "does this contain a real computed number" check below.
+    """
+    return n == int(n) and 1990 <= n <= 2035
+
+
 def _check_financial_consistency(
     answer: str,
     task_type: str,
@@ -130,14 +141,16 @@ def _check_financial_consistency(
 ) -> bool:
     """
     If the question required a derived metric (margin, growth rate, etc.),
-    make sure the answer actually contains a number -- a purely narrative
-    answer to a calculation question is a financial-consistency failure.
+    make sure the answer actually contains a real computed number -- not
+    just a bare year mention -- since a purely narrative answer to a
+    calculation question is a financial-consistency failure.
     """
 
     if not requires_calculation:
         return True
 
-    return bool(extract_numbers(answer))
+    real_numbers = [n for n in extract_numbers(answer) if not _is_probably_year(n)]
+    return bool(real_numbers)
 
 
 def verify(

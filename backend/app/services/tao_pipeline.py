@@ -29,6 +29,7 @@ class TAOPipeline:
         start = time.time()
 
         analysis = analyze_query(question)
+        requires_calculation = analysis["requires_calculation"]
 
         state = TAOState(
             max_reasoning_iterations=analysis["max_reasoning_iterations"],
@@ -48,15 +49,18 @@ class TAOPipeline:
                 "latency_seconds": round(time.time() - start, 2),
             }
 
-        prompt = self.rag_pipeline.build_prompt(question, results)
-        answer = self.rag_pipeline.ollama_client.generate(prompt)
+        prompt = self.rag_pipeline.build_prompt(
+            question, results, requires_calculation=requires_calculation
+        )
+        raw_answer = self.rag_pipeline.ollama_client.generate(prompt)
+        answer = self.rag_pipeline._clean_answer(raw_answer)
         state.reasoning_iterations += 1
 
         verification = verify(
             answer,
             results,
             task_type=analysis["task_type"],
-            requires_calculation=analysis["requires_calculation"],
+            requires_calculation=requires_calculation,
         )
         state.verification_calls += 1
 
@@ -73,8 +77,11 @@ class TAOPipeline:
                 results = self.rag_pipeline.retrieve(question, top_k=top_k)
                 state.retrieval_expansions += 1
 
-                prompt = self.rag_pipeline.build_prompt(question, results)
-                answer = self.rag_pipeline.ollama_client.generate(prompt)
+                prompt = self.rag_pipeline.build_prompt(
+                    question, results, requires_calculation=requires_calculation
+                )
+                raw_answer = self.rag_pipeline.ollama_client.generate(prompt)
+                answer = self.rag_pipeline._clean_answer(raw_answer)
                 state.reasoning_iterations += 1
 
             elif action == Action.REVISE:
@@ -85,15 +92,17 @@ class TAOPipeline:
                         "previous_answer": answer,
                         "failed_checks": verification.failed_checks,
                     },
+                    requires_calculation=requires_calculation,
                 )
-                answer = self.rag_pipeline.ollama_client.generate(prompt)
+                raw_answer = self.rag_pipeline.ollama_client.generate(prompt)
+                answer = self.rag_pipeline._clean_answer(raw_answer)
                 state.reasoning_iterations += 1
 
             verification = verify(
                 answer,
                 results,
                 task_type=analysis["task_type"],
-                requires_calculation=analysis["requires_calculation"],
+                requires_calculation=requires_calculation,
             )
             state.verification_calls += 1
 
