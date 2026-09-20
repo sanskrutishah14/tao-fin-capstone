@@ -30,6 +30,8 @@ there is no reason to ask an LLM to reproduce arithmetic that the
 system can calculate exactly.
 """
 
+from __future__ import annotations
+
 import time
 from typing import Dict, Optional
 
@@ -56,10 +58,21 @@ class TAOPipeline:
         self,
         rag_pipeline: RAGPipeline,
         company_index: Optional[Dict[str, str]] = None,
+        allow_external_fallback: bool = True,
     ):
         self.rag_pipeline = rag_pipeline
 
         self.company_index = company_index or {}
+
+        # Controls whether Yahoo Finance/external market data
+        # can be used as a fallback.
+        #
+        # Normal application:
+        #     True
+        #
+        # FinanceBench:
+        #     False
+        self.allow_external_fallback = allow_external_fallback
 
     def _guess_ticker(
         self,
@@ -511,7 +524,8 @@ class TAOPipeline:
         # ==============================================================
 
         if (
-            not computed_metric
+            self.allow_external_fallback
+            and not computed_metric
             and requires_calculation
             and verification.confidence
             < YFINANCE_FALLBACK_CONFIDENCE_THRESHOLD
@@ -592,3 +606,19 @@ class TAOPipeline:
                 2,
             ),
         }
+
+
+def create_financebench_pipeline(
+    rag_pipeline: RAGPipeline,
+) -> TAOPipeline:
+    """
+    Create a TAO pipeline specifically for FinanceBench.
+
+    External Yahoo Finance fallback is disabled.
+    """
+
+    return TAOPipeline(
+        rag_pipeline=rag_pipeline,
+        company_index={},
+        allow_external_fallback=False,
+    )
