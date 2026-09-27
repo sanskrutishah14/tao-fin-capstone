@@ -244,6 +244,13 @@ python -m evaluation.run_financebench --limit 50
 
 ---
 
+## 👥 Authors & Collaborators
+
+- **Sanskruti Shah** — Lead Contributor ([@sanskrutishah14](https://github.com/sanskrutishah14))
+- **Dhruva** — Collaborator & Co-Developer
+
+---
+
 ## 📄 License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
